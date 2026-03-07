@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+exec qemu-x86_64 -L /usr/x86_64-linux-gnu /opt/android-sdk/build-tools/34.0.0/aapt2 "$@"

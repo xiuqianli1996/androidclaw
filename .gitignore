@@ -1,0 +1,49 @@
+# Gradle
+.gradle/
+build/
+**/build/
+
+# Local config
+local.properties
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Keystore / signing
+*.jks
+*.keystore
+*.p12
+
+# Kotlin / Java
+*.class
+*.jar
+*.war
+*.ear
+
+# Android generated
+captures/
+*.apk
+*.aab
+*.ap_
+output.json
+
+# NDK
+.cxx/
+
+# Secrets
+.env
+*.pem
+*.key
+*credentials*.json
+
+# Local session notes
+SESSION_MEMORY.md

@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/opt/android-sdk}}"
+AAPT2_BIN=""
+
+for ver in 35.0.0 34.0.0; do
+  candidate="${SDK_ROOT}/build-tools/${ver}/aapt2"
+  if [ -x "${candidate}" ]; then
+    AAPT2_BIN="${candidate}"
+    break
+  fi
+done
+
+if [ -z "${AAPT2_BIN}" ]; then
+  echo "aapt2 not found under ${SDK_ROOT}/build-tools" >&2
+  exit 1
+fi
+
+exec qemu-x86_64 -L /usr/x86_64-linux-gnu "${AAPT2_BIN}" "$@"
