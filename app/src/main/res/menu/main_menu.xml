@@ -9,6 +9,21 @@
         app:showAsAction="never" />
 
     <item
+        android:id="@+id/action_agent_settings"
+        android:title="Agent 配置"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/action_tools"
+        android:title="内置工具列表"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/action_mcp"
+        android:title="MCP 配置"
+        app:showAsAction="never" />
+
+    <item
         android:id="@+id/action_clear"
         android:title="清空对话"
         app:showAsAction="never" />

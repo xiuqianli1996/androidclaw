@@ -2,20 +2,9 @@ package ai.androidclaw.config
 
 import android.content.Context
 import android.content.SharedPreferences
-
-enum class ModelProvider(val displayName: String) {
-    OPENAI("OpenAI"),
-    GOOGLE_GEMINI("Google Gemini")
-}
-
-data class ModelConfig(
-    val provider: ModelProvider = ModelProvider.OPENAI,
-    val apiKey: String = "",
-    val baseUrl: String = "",
-    val modelName: String = "gpt-4o-mini",
-    val temperature: Float = 0.7f,
-    val maxTokens: Int = 4096
-)
+import ai.androidclaw.agent.core.ClawModelCatalog
+import ai.androidclaw.agent.core.ModelConfig
+import ai.androidclaw.agent.core.ModelProvider
 
 class ConfigManager(context: Context) {
 
@@ -39,8 +28,8 @@ class ConfigManager(context: Context) {
             provider = provider,
             apiKey = prefs.getString(KEY_API_KEY, "") ?: "",
             baseUrl = prefs.getString(KEY_BASE_URL, "") ?: "",
-            modelName = prefs.getString(KEY_MODEL_NAME, getDefaultModelForProvider(provider))
-                ?: getDefaultModelForProvider(provider),
+            modelName = prefs.getString(KEY_MODEL_NAME, ClawModelCatalog.defaultModelForProvider(provider))
+                ?: ClawModelCatalog.defaultModelForProvider(provider),
             temperature = prefs.getFloat(KEY_TEMPERATURE, 0.7f),
             maxTokens = prefs.getInt(KEY_MAX_TOKENS, 4096)
         )
@@ -56,19 +45,12 @@ class ConfigManager(context: Context) {
     }
 
     fun getDefaultModelName(): String {
-        return getDefaultModelForProvider(getStoredProvider())
+        return ClawModelCatalog.defaultModelForProvider(getStoredProvider())
     }
 
     fun setProvider(provider: ModelProvider) {
         prefs.edit().putString(KEY_PROVIDER, provider.name).apply()
-        prefs.edit().putString(KEY_MODEL_NAME, getDefaultModelForProvider(provider)).apply()
-    }
-
-    private fun getDefaultModelForProvider(provider: ModelProvider): String {
-        return when (provider) {
-            ModelProvider.OPENAI -> "gpt-4o-mini"
-            ModelProvider.GOOGLE_GEMINI -> "gemini-pro"
-        }
+        prefs.edit().putString(KEY_MODEL_NAME, ClawModelCatalog.defaultModelForProvider(provider)).apply()
     }
 
     private fun getStoredProvider(): ModelProvider {
@@ -83,20 +65,23 @@ class ConfigManager(context: Context) {
     }
 
     fun getAvailableModels(): List<String> {
-        return when (getModelConfig().provider) {
-            ModelProvider.OPENAI -> listOf(
-                "gpt-4o",
-                "gpt-4o-mini",
-                "gpt-4-turbo",
-                "gpt-3.5-turbo"
-            )
-            ModelProvider.GOOGLE_GEMINI -> listOf(
-                "gemini-pro",
-                "gemini-pro-vision",
-                "gemini-1.5-pro",
-                "gemini-1.5-flash"
-            )
+        return ClawModelCatalog.availableModels(getModelConfig().provider)
+    }
+
+    fun saveAgentConfig(systemPrompt: String, maxIterations: Int) {
+        prefs.edit().apply {
+            putString(KEY_AGENT_SYSTEM_PROMPT, systemPrompt)
+            putInt(KEY_AGENT_MAX_ITERATIONS, maxIterations.coerceIn(1, 50))
+            apply()
         }
+    }
+
+    fun getAgentSystemPrompt(): String {
+        return prefs.getString(KEY_AGENT_SYSTEM_PROMPT, "") ?: ""
+    }
+
+    fun getAgentMaxIterations(): Int {
+        return prefs.getInt(KEY_AGENT_MAX_ITERATIONS, 10).coerceIn(1, 50)
     }
 
     companion object {
@@ -107,6 +92,8 @@ class ConfigManager(context: Context) {
         private const val KEY_MODEL_NAME = "model_name"
         private const val KEY_TEMPERATURE = "temperature"
         private const val KEY_MAX_TOKENS = "max_tokens"
+        private const val KEY_AGENT_SYSTEM_PROMPT = "agent_system_prompt"
+        private const val KEY_AGENT_MAX_ITERATIONS = "agent_max_iterations"
 
         @Volatile
         private var instance: ConfigManager? = null

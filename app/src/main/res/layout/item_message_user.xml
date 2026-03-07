@@ -4,9 +4,21 @@
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
     android:paddingStart="48dp"
-    android:paddingEnd="16dp"
+    android:paddingEnd="12dp"
     android:paddingTop="4dp"
     android:paddingBottom="4dp">
+
+    <TextView
+        android:id="@+id/tv_avatar"
+        android:layout_width="28dp"
+        android:layout_height="28dp"
+        android:background="@android:color/white"
+        android:gravity="center"
+        android:text="👤"
+        android:textSize="16sp"
+        app:layout_constraintBottom_toBottomOf="@id/card_message"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintTop_toTopOf="@id/card_message" />
 
     <com.google.android.material.card.MaterialCardView
         android:id="@+id/card_message"
@@ -15,7 +27,8 @@
         app:cardBackgroundColor="@color/user_message_bg"
         app:cardCornerRadius="16dp"
         app:cardElevation="1dp"
-        app:layout_constraintEnd_toEndOf="parent"
+        android:layout_marginEnd="8dp"
+        app:layout_constraintEnd_toStartOf="@id/tv_avatar"
         app:layout_constraintTop_toTopOf="parent">
 
         <LinearLayout

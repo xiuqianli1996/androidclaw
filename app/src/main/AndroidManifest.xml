@@ -47,6 +47,12 @@
             android:theme="@style/Theme.AndroidClaw" />
 
         <activity
+            android:name=".ui.AgentSettingsActivity"
+            android:exported="false"
+            android:parentActivityName=".ui.MainActivity"
+            android:theme="@style/Theme.AndroidClaw" />
+
+        <activity
             android:name=".ui.FeishuSettingsActivity"
             android:exported="false"
             android:parentActivityName=".ui.MainActivity"
@@ -54,6 +60,12 @@
 
         <activity
             android:name=".ui.SkillsActivity"
+            android:exported="false"
+            android:parentActivityName=".ui.MainActivity"
+            android:theme="@style/Theme.AndroidClaw" />
+
+        <activity
+            android:name=".ui.McpSettingsActivity"
             android:exported="false"
             android:parentActivityName=".ui.MainActivity"
             android:theme="@style/Theme.AndroidClaw" />

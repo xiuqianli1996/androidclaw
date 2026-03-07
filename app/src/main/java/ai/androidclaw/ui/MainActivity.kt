@@ -7,6 +7,7 @@ import android.view.Menu
 import android.view.MenuItem
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -110,11 +111,7 @@ class MainActivity : AppCompatActivity() {
 
         val config = configManager.getModelConfig()
         if (!agentManager.isReady()) {
-            agentManager.initialize(
-                apiKey = config.apiKey,
-                modelName = config.modelName,
-                baseUrl = config.baseUrl.ifBlank { null }
-            )
+            agentManager.initialize(config)
         }
 
         lifecycleScope.launch {
@@ -200,10 +197,35 @@ class MainActivity : AppCompatActivity() {
             }
 
             // Send to agent
-            agentManager.execute(content) { response ->
+            val imageDataUrl = if (messageType == "image" && mediaUrl != null) {
+                encodeImageAsDataUrl(Uri.parse(mediaUrl))
+            } else {
+                null
+            }
+
+            val systemPrompt = configManager.getAgentSystemPrompt()
+            val maxIterations = configManager.getAgentMaxIterations()
+
+            agentManager.execute(
+                content,
+                imageDataUrl = imageDataUrl,
+                systemPrompt = systemPrompt,
+                maxIterations = maxIterations
+            ) { response ->
                 handleAgentResponse(response)
             }
         }
+    }
+
+    private fun encodeImageAsDataUrl(uri: Uri): String? {
+        return runCatching {
+            contentResolver.openInputStream(uri)?.use { input ->
+                val bytes = input.readBytes()
+                val mimeType = contentResolver.getType(uri) ?: "image/jpeg"
+                val base64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+                "data:$mimeType;base64,$base64"
+            }
+        }.getOrNull()
     }
 
     private fun handleAgentResponse(response: AgentResponse) {
@@ -245,6 +267,18 @@ class MainActivity : AppCompatActivity() {
                 startActivity(Intent(this, SettingsActivity::class.java))
                 true
             }
+            R.id.action_agent_settings -> {
+                startActivity(Intent(this, AgentSettingsActivity::class.java))
+                true
+            }
+            R.id.action_tools -> {
+                showToolsDialog()
+                true
+            }
+            R.id.action_mcp -> {
+                startActivity(Intent(this, McpSettingsActivity::class.java))
+                true
+            }
             R.id.action_clear -> {
                 clearConversation()
                 true
@@ -264,5 +298,25 @@ class MainActivity : AppCompatActivity() {
             }
             Toast.makeText(this@MainActivity, "对话已清空", Toast.LENGTH_SHORT).show()
         }
+    }
+
+    private fun showToolsDialog() {
+        if (!agentManager.isReady()) {
+            Toast.makeText(this, "Agent 尚未初始化", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val specs = agentManager.getToolSpecifications().sortedBy { it.name() }
+        val message = if (specs.isEmpty()) {
+            "暂无可用工具"
+        } else {
+            specs.joinToString("\n\n") { "${it.name()}\n${it.description()}" }
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("内置工具列表")
+            .setMessage(message)
+            .setPositiveButton("关闭", null)
+            .show()
     }
 }

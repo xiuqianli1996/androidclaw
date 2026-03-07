@@ -5,6 +5,7 @@ import ai.androidclaw.db.AppDatabase
 import ai.androidclaw.db.entity.Conversation
 import ai.androidclaw.db.entity.Message
 import ai.androidclaw.db.entity.MessageRole
+import ai.androidclaw.config.ConfigManager
 import android.content.Context
 import android.util.Log
 import com.google.gson.Gson
@@ -20,6 +21,7 @@ class FeishuBotService(context: Context) {
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val feishuConfigManager = FeishuConfigManager.getInstance(context)
+    private val configManager = ConfigManager.getInstance(context)
     private val agentManager = AgentManager.getInstance(context)
     private val database = AppDatabase.getInstance(context)
 
@@ -155,7 +157,11 @@ class FeishuBotService(context: Context) {
             )
             database.messageDao().insert(userMessage)
 
-            agentManager.execute(textContent) { response ->
+            agentManager.execute(
+                textContent,
+                systemPrompt = configManager.getAgentSystemPrompt(),
+                maxIterations = configManager.getAgentMaxIterations()
+            ) { response ->
                 scope.launch {
                     val replyContent = if (response.error != null) {
                         "处理失败: ${response.error}"
@@ -275,7 +281,11 @@ class FeishuBotService(context: Context) {
         )
         database.messageDao().insert(userMessage)
 
-        agentManager.execute(textContent) { response ->
+        agentManager.execute(
+            textContent,
+            systemPrompt = configManager.getAgentSystemPrompt(),
+            maxIterations = configManager.getAgentMaxIterations()
+        ) { response ->
             scope.launch {
                 val replyContent = if (response.error != null) {
                     "处理失败: ${response.error}"

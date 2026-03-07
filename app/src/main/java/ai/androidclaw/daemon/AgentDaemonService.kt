@@ -87,11 +87,7 @@ class AgentDaemonService : LifecycleService() {
     private fun ensureComponentsReady() {
         val modelConfig = configManager.getModelConfig()
         if (!agentManager.isReady() && modelConfig.apiKey.isNotBlank()) {
-            agentManager.initialize(
-                apiKey = modelConfig.apiKey,
-                modelName = modelConfig.modelName,
-                baseUrl = modelConfig.baseUrl.ifBlank { null }
-            )
+            agentManager.initialize(modelConfig)
             Log.d(TAG, "Agent initialized in daemon")
         }
 

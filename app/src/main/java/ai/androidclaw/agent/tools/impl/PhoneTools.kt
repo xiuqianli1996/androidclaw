@@ -4,7 +4,9 @@ import ai.androidclaw.agent.tools.ClawTool
 import ai.androidclaw.agent.tools.ClawToolExecutor
 import ai.androidclaw.agent.tools.ToolCategory
 import ai.androidclaw.agent.tools.ToolResult
+import ai.androidclaw.ClawApplication
 import ai.androidclaw.service.ClawAccessibilityService
+import ai.androidclaw.ui.overlay.ExecutionOverlayManager
 import dev.langchain4j.agent.tool.Tool
 import dev.langchain4j.agent.tool.ToolSpecification
 import dev.langchain4j.agent.tool.ToolSpecifications
@@ -111,8 +113,73 @@ class PhoneTools {
     fun getScreenText(): ToolResult {
         val service = ClawAccessibilityService.instance
         return if (service != null) {
-            val text = service.getScreenText()
+            val overlay = ExecutionOverlayManager.getInstance(ClawApplication.instance)
+            val text = overlay.runWithCaptureHidden { service.getScreenText() }
             ToolResult.success(text.ifEmpty { "屏幕为空或无法获取内容" })
+        } else {
+            ToolResult.error("无障碍服务未启动")
+        }
+    }
+
+    @Tool(name = "phone_input_text", value = ["在当前可编辑输入框中输入文本"])
+    fun inputText(text: String): ToolResult {
+        val service = ClawAccessibilityService.instance
+        return if (service != null) {
+            val success = service.inputText(text)
+            if (success) ToolResult.success("已输入文本")
+            else ToolResult.error("未找到可输入控件或输入失败")
+        } else {
+            ToolResult.error("无障碍服务未启动")
+        }
+    }
+
+    @Tool(name = "phone_ime_enter", value = ["在当前输入框触发输入法回车/发送动作"])
+    fun imeEnter(): ToolResult {
+        val service = ClawAccessibilityService.instance
+        return if (service != null) {
+            val success = service.pressImeEnter()
+            if (success) ToolResult.success("已触发输入法回车")
+            else ToolResult.error("触发输入法回车失败")
+        } else {
+            ToolResult.error("无障碍服务未启动")
+        }
+    }
+
+    @Tool(name = "phone_get_screenshot", value = ["获取当前屏幕截图，返回data URL"])
+    fun getScreenshot(): ToolResult {
+        val service = ClawAccessibilityService.instance
+        return if (service != null) {
+            val overlay = ExecutionOverlayManager.getInstance(ClawApplication.instance)
+            val dataUrl = overlay.runWithCaptureHidden { service.captureScreenshotDataUrl() }
+            if (!dataUrl.isNullOrBlank()) {
+                ToolResult.success(dataUrl)
+            } else {
+                ToolResult.error("截图失败")
+            }
+        } else {
+            ToolResult.error("无障碍服务未启动")
+        }
+    }
+
+    @Tool(name = "phone_wait", value = ["阻塞等待指定毫秒数，用于等待页面加载"])
+    fun waitFor(milliseconds: Long): ToolResult {
+        val duration = milliseconds.coerceIn(100L, 10_000L)
+        return try {
+            Thread.sleep(duration)
+            ToolResult.success("已等待${duration}ms")
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            ToolResult.error("等待被中断")
+        }
+    }
+
+    @Tool(name = "phone_wait_text", value = ["等待屏幕出现指定文本，常用于等待页面加载完成"])
+    fun waitText(text: String, timeoutMs: Long = 5000): ToolResult {
+        val service = ClawAccessibilityService.instance
+        return if (service != null) {
+            val found = service.waitForText(text, timeoutMs)
+            if (found) ToolResult.success("已检测到文本: $text")
+            else ToolResult.error("等待超时，未检测到文本: $text")
         } else {
             ToolResult.error("无障碍服务未启动")
         }

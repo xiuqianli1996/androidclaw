@@ -8,6 +8,9 @@ class ToolRegistry {
     private val categoryTools = mutableMapOf<ToolCategory, MutableList<ClawToolExecutor>>()
 
     fun register(tool: ClawToolExecutor) {
+        tools[tool.name]?.let { existing ->
+            categoryTools[existing.category]?.remove(existing)
+        }
         tools[tool.name] = tool
         categoryTools.getOrPut(tool.category) { mutableListOf() }.add(tool)
     }

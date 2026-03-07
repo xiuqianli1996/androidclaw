@@ -3,10 +3,22 @@
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:paddingStart="16dp"
+    android:paddingStart="12dp"
     android:paddingEnd="48dp"
     android:paddingTop="4dp"
     android:paddingBottom="4dp">
+
+    <TextView
+        android:id="@+id/tv_avatar"
+        android:layout_width="28dp"
+        android:layout_height="28dp"
+        android:background="@android:color/white"
+        android:gravity="center"
+        android:text="🦀"
+        android:textSize="16sp"
+        app:layout_constraintBottom_toBottomOf="@id/card_message"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="@id/card_message" />
 
     <com.google.android.material.card.MaterialCardView
         android:id="@+id/card_message"
@@ -15,7 +27,8 @@
         app:cardBackgroundColor="@color/ai_message_bg"
         app:cardCornerRadius="16dp"
         app:cardElevation="1dp"
-        app:layout_constraintStart_toStartOf="parent"
+        android:layout_marginStart="8dp"
+        app:layout_constraintStart_toEndOf="@id/tv_avatar"
         app:layout_constraintTop_toTopOf="parent">
 
         <LinearLayout

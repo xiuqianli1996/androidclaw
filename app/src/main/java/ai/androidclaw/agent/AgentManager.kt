@@ -6,20 +6,28 @@ import ai.androidclaw.agent.core.AgentRequest
 import ai.androidclaw.agent.core.AgentResponse
 import ai.androidclaw.agent.core.ClawAgent
 import ai.androidclaw.agent.core.ClawAgentBuilder
+import ai.androidclaw.agent.core.ModelConfig
 import ai.androidclaw.agent.memory.AgentMemory
 import ai.androidclaw.agent.skills.SkillManager
 import ai.androidclaw.agent.skills.Skill
 import ai.androidclaw.agent.subagent.SubAgentManager
 import ai.androidclaw.agent.subagent.SubAgentConfig
 import ai.androidclaw.agent.subagent.SubAgentResult
+import ai.androidclaw.agent.subagent.SubAgentToolFactory
 import ai.androidclaw.agent.tools.ToolFactory
 import ai.androidclaw.agent.tools.ToolRegistry
+import ai.androidclaw.mcp.McpConfigManager
+import ai.androidclaw.mcp.McpStdioClient
+import ai.androidclaw.mcp.McpToolExecutor
+import ai.androidclaw.ui.overlay.ExecutionOverlayManager
+import dev.langchain4j.agent.tool.ToolSpecification
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class AgentManager private constructor(
     private val context: Context
@@ -38,37 +46,88 @@ class AgentManager private constructor(
     private var apiKey: String = ""
     private var modelName: String = "gpt-4o-mini"
     private var baseUrl: String? = null
+    private var modelConfig: ModelConfig = ModelConfig()
+    private val mcpToolNames = mutableSetOf<String>()
+    private val overlayManager = ExecutionOverlayManager.getInstance(context)
 
     fun initialize(apiKey: String, modelName: String = "gpt-4o-mini", baseUrl: String? = null) {
-        this.apiKey = apiKey
-        this.modelName = modelName
-        this.baseUrl = baseUrl
+        initialize(
+            ModelConfig(
+                apiKey = apiKey,
+                modelName = modelName,
+                baseUrl = baseUrl ?: ""
+            )
+        )
+    }
+
+    fun initialize(modelConfig: ModelConfig) {
+        this.modelConfig = modelConfig
+        this.apiKey = modelConfig.apiKey
+        this.modelName = modelConfig.modelName
+        this.baseUrl = modelConfig.baseUrl.takeIf { it.isNotBlank() }
 
         toolRegistry = ToolRegistry()
         memory = AgentMemory()
         skillManager = SkillManager()
         
         ToolFactory(toolRegistry).registerAllTools()
+        registerMcpTools()
         
         agent = ClawAgentBuilder()
-            .apiKey(apiKey)
-            .modelName(modelName)
-            .baseUrl(baseUrl)
+            .modelConfig(modelConfig)
             .toolRegistry(toolRegistry)
             .memory(memory)
             .skillManager(skillManager)
+            .progressReporter { msg ->
+                runCatching { overlayManager.update(msg) }
+            }
             .build()
 
         subAgentManager = SubAgentManager(agent)
         subAgentManager.createDefaultSubAgents()
+        SubAgentToolFactory.register(toolRegistry, subAgentManager)
 
         isInitialized = true
         Log.d(TAG, "AgentManager initialized with ${toolRegistry.size()} tools")
     }
 
+    fun refreshMcpTools() {
+        if (!isInitialized) return
+        mcpToolNames.forEach { toolRegistry.unregister(it) }
+        mcpToolNames.clear()
+        registerMcpTools()
+        Log.d(TAG, "MCP tools refreshed: ${mcpToolNames.size}")
+    }
+
+    private fun registerMcpTools() {
+        val mcpConfigs = McpConfigManager.getInstance(context).getEnabledServers()
+        mcpConfigs.forEach { server ->
+            if (server.transport.name != "STDIO") {
+                return@forEach
+            }
+            runCatching {
+                val tools = McpStdioClient.listTools(server)
+                tools.forEach { discovered ->
+                    val executor = McpToolExecutor(
+                        serverConfig = server,
+                        mcpToolName = discovered.name,
+                        mcpToolDescription = discovered.description,
+                        inputSchema = discovered.inputSchema
+                    )
+                    toolRegistry.register(executor)
+                    mcpToolNames.add(executor.name)
+                }
+            }.onFailure { e ->
+                Log.w(TAG, "Failed to load MCP tools from ${server.name}: ${e.message}")
+            }
+        }
+    }
+
     fun execute(
         message: String,
+        imageDataUrl: String? = null,
         systemPrompt: String = "",
+        maxIterations: Int = 10,
         callback: (AgentResponse) -> Unit
     ) {
         if (!isInitialized) {
@@ -82,33 +141,49 @@ class AgentManager private constructor(
         }
 
         currentJob?.cancel()
-        currentJob = scope.launch {
+        currentJob = scope.launch(Dispatchers.IO) {
             try {
+                withContext(Dispatchers.Main) {
+                    overlayManager.show("任务已开始")
+                }
                 if (memory.shouldCompact()) {
-                    val compacted = memory.compact()
+                    val compacted = agent.compactMemory()
                     Log.d(TAG, "Memory compacted: $compacted items")
                 }
 
                 val request = AgentRequest(
                     message = message,
-                    systemPrompt = systemPrompt
+                    imageDataUrl = imageDataUrl,
+                    systemPrompt = systemPrompt,
+                    maxIterations = maxIterations
                 )
 
                 val response = agent.execute(request)
-                callback(response)
+                withContext(Dispatchers.Main) {
+                    callback(response)
+                    overlayManager.hide()
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Agent execution failed", e)
-                callback(AgentResponse(
-                    message = "执行失败",
-                    toolCalls = emptyList(),
-                    done = false,
-                    error = e.message
-                ))
+                withContext(Dispatchers.Main) {
+                    callback(AgentResponse(
+                        message = "执行失败",
+                        toolCalls = emptyList(),
+                        done = false,
+                        error = e.message
+                    ))
+                    overlayManager.hide()
+                }
             }
         }
     }
 
-    suspend fun executeAsync(message: String, systemPrompt: String = ""): AgentResponse {
+    suspend fun executeAsync(
+        message: String,
+        imageDataUrl: String? = null,
+        systemPrompt: String = "",
+        maxIterations: Int = 10
+    ): AgentResponse {
         if (!isInitialized) {
             return AgentResponse(
                 message = "Agent未初始化",
@@ -120,16 +195,20 @@ class AgentManager private constructor(
 
         return try {
             if (memory.shouldCompact()) {
-                val compacted = memory.compact()
+                val compacted = agent.compactMemory()
                 Log.d(TAG, "Memory compacted: $compacted items")
             }
 
             val request = AgentRequest(
                 message = message,
-                systemPrompt = systemPrompt
+                imageDataUrl = imageDataUrl,
+                systemPrompt = systemPrompt,
+                maxIterations = maxIterations
             )
 
-            agent.execute(request)
+            withContext(Dispatchers.IO) {
+                agent.execute(request)
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Agent execution failed", e)
             AgentResponse(
@@ -167,9 +246,14 @@ class AgentManager private constructor(
 
     fun getAvailableTools(): List<String> = toolRegistry.getToolNames().toList()
 
+    fun getToolSpecifications(): List<ToolSpecification> {
+        if (!isInitialized) return emptyList()
+        return toolRegistry.getToolSpecifications()
+    }
+
     fun getMemorySize(): Int = memory.size()
 
-    fun compactMemory(): Int = memory.compact()
+    suspend fun compactMemory(): Int = agent.compactMemory()
 
     fun clearMemory() = memory.clear()
 

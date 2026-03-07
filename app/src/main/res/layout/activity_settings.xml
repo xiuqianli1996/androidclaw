@@ -95,17 +95,17 @@
 
             <com.google.android.material.textfield.TextInputLayout
                 android:id="@+id/til_model"
-                style="@style/Widget.Material3.TextInputLayout.OutlinedBox.ExposedDropdownMenu"
+                style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="12dp"
-                android:hint="选择模型">
+                android:hint="模型名称（必填）">
 
-                <AutoCompleteTextView
-                    android:id="@+id/actv_model"
+                <com.google.android.material.textfield.TextInputEditText
+                    android:id="@+id/et_model"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:inputType="none" />
+                    android:inputType="text" />
 
             </com.google.android.material.textfield.TextInputLayout>
 

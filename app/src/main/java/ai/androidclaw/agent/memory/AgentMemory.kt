@@ -125,6 +125,31 @@ class AgentMemory(
         }
     }
 
+    fun compactWithSummary(summary: String): Int {
+        return lock.write {
+            if (memory.size < 10) return@write 0
+
+            val items = memory.toList()
+            val toCompact = items.take(items.size / 2)
+            val normalizedSummary = summary.ifBlank { generateSummary(toCompact) }
+
+            compactedSummary.appendLine(normalizedSummary)
+            totalCompacted += toCompact.size
+
+            memory.clear()
+            memory.add(
+                MemoryItem(
+                    role = "system",
+                    content = "[压缩记忆] 已压缩${totalCompacted}条记录。摘要: $normalizedSummary",
+                    type = MemoryType.COMPACTED
+                )
+            )
+
+            saveToDisk()
+            toCompact.size
+        }
+    }
+
     private fun generateSummary(items: List<MemoryItem>): String {
         val toolCalls = items.count { it.type == MemoryType.TOOL_RESULT }
         val userMessages = items.count { it.role == "user" }

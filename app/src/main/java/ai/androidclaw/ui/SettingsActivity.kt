@@ -1,25 +1,25 @@
 package ai.androidclaw.ui
 
 import android.content.Intent
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.os.Bundle
-import android.text.InputType
-import android.util.Log
 import android.view.MenuItem
 import android.widget.ArrayAdapter
 import android.widget.AutoCompleteTextView
 import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.widget.addTextChangedListener
 import ai.androidclaw.R
 import ai.androidclaw.agent.AgentManager
+import ai.androidclaw.agent.core.ClawModelFactory
+import ai.androidclaw.agent.core.ModelConfig
+import ai.androidclaw.agent.core.ModelProvider
 import ai.androidclaw.config.ConfigManager
-import ai.androidclaw.config.ModelConfig
-import ai.androidclaw.config.ModelFactory
-import ai.androidclaw.config.ModelProvider
 import ai.androidclaw.databinding.ActivitySettingsBinding
 import ai.androidclaw.feishu.FeishuBotService
-import com.google.android.material.textfield.TextInputEditText
-import com.google.android.material.textfield.TextInputLayout
 import dev.langchain4j.data.message.UserMessage
 
 class SettingsActivity : AppCompatActivity() {
@@ -40,7 +40,6 @@ class SettingsActivity : AppCompatActivity() {
 
         setupToolbar()
         setupProviderDropdown()
-        setupModelDropdown()
         setupInputs()
         loadConfig()
         setupSaveButton()
@@ -83,15 +82,9 @@ class SettingsActivity : AppCompatActivity() {
         (binding.tilProvider.editText as? AutoCompleteTextView)?.setOnItemClickListener { _, _, position, _ ->
             currentProvider = ModelProvider.entries[position]
             configManager.setProvider(currentProvider)
-            updateModelDropdown()
+            ensureModelDefaultIfEmpty()
             updateBaseUrlHint()
         }
-    }
-
-    private fun updateModelDropdown() {
-        val models = configManager.getAvailableModels()
-        val adapter = ArrayAdapter(this, android.R.layout.simple_dropdown_item_1line, models)
-        (binding.tilModel.editText as? AutoCompleteTextView)?.setAdapter(adapter)
     }
 
     private fun updateBaseUrlHint() {
@@ -102,13 +95,13 @@ class SettingsActivity : AppCompatActivity() {
         binding.tilBaseUrl.isEnabled = currentProvider == ModelProvider.OPENAI
     }
 
-    private fun setupModelDropdown() {
-        updateModelDropdown()
-    }
-
     private fun setupInputs() {
         binding.etApiKey.addTextChangedListener {
             binding.tilApiKey.error = null
+        }
+
+        binding.etModel.addTextChangedListener {
+            binding.tilModel.error = null
         }
 
         binding.etBaseUrl.addTextChangedListener {
@@ -128,13 +121,11 @@ class SettingsActivity : AppCompatActivity() {
         val config = configManager.getModelConfig()
         currentProvider = config.provider
 
-        val providerIndex = ModelProvider.entries.indexOf(config.provider)
         (binding.tilProvider.editText as? AutoCompleteTextView)?.setText(
             config.provider.displayName, false
         )
 
-        updateModelDropdown()
-        (binding.tilModel.editText as? AutoCompleteTextView)?.setText(config.modelName, false)
+        binding.etModel.setText(config.modelName)
 
         binding.etApiKey.setText(config.apiKey)
         binding.etBaseUrl.setText(config.baseUrl)
@@ -161,6 +152,12 @@ class SettingsActivity : AppCompatActivity() {
 
         if (binding.etApiKey.text.isNullOrBlank()) {
             binding.tilApiKey.error = "API Key 不能为空"
+            isValid = false
+        }
+
+        val modelName = binding.etModel.text?.toString()?.trim().orEmpty()
+        if (modelName.isBlank()) {
+            binding.tilModel.error = "模型名称不能为空"
             isValid = false
         }
 
@@ -192,7 +189,7 @@ class SettingsActivity : AppCompatActivity() {
             provider = currentProvider,
             apiKey = binding.etApiKey.text.toString().trim(),
             baseUrl = binding.etBaseUrl.text?.toString()?.trim() ?: "",
-            modelName = (binding.tilModel.editText as? AutoCompleteTextView)?.text.toString(),
+            modelName = binding.etModel.text?.toString()?.trim().orEmpty(),
             temperature = binding.etTemperature.text.toString().toFloat(),
             maxTokens = binding.etMaxTokens.text.toString().toInt()
         )
@@ -200,11 +197,7 @@ class SettingsActivity : AppCompatActivity() {
         configManager.saveModelConfig(config)
         Toast.makeText(this, "配置已保存", Toast.LENGTH_SHORT).show()
         
-        AgentManager.getInstance(this).initialize(
-            apiKey = config.apiKey,
-            modelName = config.modelName,
-            baseUrl = config.baseUrl.ifBlank { null }
-        )
+        AgentManager.getInstance(this).initialize(config)
         
         finish()
     }
@@ -215,43 +208,78 @@ class SettingsActivity : AppCompatActivity() {
             return
         }
 
-        binding.btnTest.isEnabled = false
-        binding.btnTest.text = "测试中..."
+        val modelName = binding.etModel.text?.toString()?.trim().orEmpty()
+        if (modelName.isBlank()) {
+            binding.tilModel.error = "请先输入模型名称"
+            return
+        }
+
+        setTestingState(true)
 
         try {
             val config = ModelConfig(
                 provider = currentProvider,
                 apiKey = binding.etApiKey.text.toString().trim(),
                 baseUrl = binding.etBaseUrl.text?.toString()?.trim() ?: "",
-                modelName = (binding.tilModel.editText as? AutoCompleteTextView)?.text.toString(),
+                modelName = modelName,
                 temperature = 0.7f,
                 maxTokens = 100
             )
 
-            val model = ModelFactory.createChatModel(config)
+            val model = ClawModelFactory.createChatModel(config)
             
             Thread {
                 try {
                     val response = model.generate(listOf(UserMessage("Hello"))).content().text()
                     runOnUiThread {
                         Toast.makeText(this, "连接成功! 响应: $response", Toast.LENGTH_LONG).show()
-                        binding.btnTest.isEnabled = true
-                        binding.btnTest.text = "测试连接"
+                        setTestingState(false)
                     }
                 } catch (e: Exception) {
                     runOnUiThread {
-                        Toast.makeText(this, "连接失败: ${e.message}", Toast.LENGTH_LONG).show()
-                        binding.btnTest.isEnabled = true
-                        binding.btnTest.text = "测试连接"
+                        showErrorDialog(
+                            title = "连接失败",
+                            message = e.message ?: "未知错误",
+                            detail = e.stackTraceToString()
+                        )
+                        setTestingState(false)
                     }
                 }
             }.start()
 
         } catch (e: Exception) {
-            Toast.makeText(this, "配置错误: ${e.message}", Toast.LENGTH_SHORT).show()
-            binding.btnTest.isEnabled = true
-            binding.btnTest.text = "测试连接"
+            showErrorDialog(
+                title = "配置错误",
+                message = e.message ?: "未知错误",
+                detail = e.stackTraceToString()
+            )
+            setTestingState(false)
         }
+    }
+
+    private fun ensureModelDefaultIfEmpty() {
+        if (binding.etModel.text.isNullOrBlank()) {
+            binding.etModel.setText(configManager.getDefaultModelName())
+        }
+    }
+
+    private fun setTestingState(testing: Boolean) {
+        binding.btnTest.isEnabled = !testing
+        binding.btnTest.text = if (testing) "测试中..." else "测试连接"
+    }
+
+    private fun showErrorDialog(title: String, message: String, detail: String) {
+        val fullMessage = "${message.trim()}\n\n详细信息:\n$detail"
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .setMessage(fullMessage)
+            .setPositiveButton("关闭", null)
+            .setNeutralButton("复制错误") { _, _ ->
+                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                clipboard.setPrimaryClip(ClipData.newPlainText("error", fullMessage))
+                Toast.makeText(this, "错误信息已复制", Toast.LENGTH_SHORT).show()
+            }
+            .show()
     }
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
