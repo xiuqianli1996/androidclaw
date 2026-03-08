@@ -1,6 +1,7 @@
 package ai.androidclaw.service
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.AccessibilityServiceInfo
 import android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK
 import android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_HOME
 import android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_RECENTS
@@ -9,6 +10,8 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.ColorSpace
 import android.graphics.Path
+import android.graphics.BitmapFactory
+import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
@@ -16,11 +19,14 @@ import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import java.io.ByteArrayOutputStream
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
 class ClawAccessibilityService : AccessibilityService() {
+
+    private val snapshotNodeBounds = ConcurrentHashMap<String, Rect>()
 
     companion object {
         var instance: ClawAccessibilityService? = null
@@ -147,6 +153,16 @@ class ClawAccessibilityService : AccessibilityService() {
         return dispatchGesture(gesture, null, null)
     }
 
+    fun clickOnScreenshotCoordinates(imageX: Float, imageY: Float, imageWidth: Float, imageHeight: Float): Boolean {
+        if (imageWidth <= 0f || imageHeight <= 0f) return false
+        val dm = resources.displayMetrics
+        val screenX = (imageX / imageWidth) * dm.widthPixels.toFloat()
+        val screenY = (imageY / imageHeight) * dm.heightPixels.toFloat()
+        val clampedX = screenX.coerceIn(0f, dm.widthPixels.toFloat() - 1f)
+        val clampedY = screenY.coerceIn(0f, dm.heightPixels.toFloat() - 1f)
+        return clickOnScreen(clampedX, clampedY)
+    }
+
     fun longClickOnScreen(x: Float, y: Float): Boolean {
         val path = Path().apply {
             moveTo(x, y)
@@ -198,6 +214,100 @@ class ClawAccessibilityService : AccessibilityService() {
         collectTextRecursively(rootNode, text)
         rootNode.recycle()
         return text.toString()
+    }
+
+    fun getUiSnapshotCompact(maxNodes: Int = 80): String {
+        val rootNode = rootInActiveWindow ?: return ""
+        val output = StringBuilder()
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        val collected = mutableListOf<AccessibilityNodeInfo>()
+        queue.add(rootNode)
+
+        var counter = 1
+        snapshotNodeBounds.clear()
+
+        output.appendLine("window_title: ${getCurrentWindowTitle()}")
+
+        while (queue.isNotEmpty() && counter <= maxNodes.coerceIn(20, 200)) {
+            val node = queue.removeFirst()
+            collected.add(node)
+
+            val include = shouldIncludeInSnapshot(node)
+            if (include) {
+                val bounds = Rect().also { node.getBoundsInScreen(it) }
+                val nodeId = "n$counter"
+                snapshotNodeBounds[nodeId] = Rect(bounds)
+
+                val text = normalizeText(node.text?.toString())
+                val desc = normalizeText(node.contentDescription?.toString())
+                val viewId = normalizeText(node.viewIdResourceName)
+                val clazz = normalizeText(node.className?.toString())
+
+                output.append("- id=").append(nodeId)
+                    .append(" cls=").append(if (clazz.isBlank()) "?" else clazz)
+                    .append(" b=").append("[")
+                    .append(bounds.left).append(",")
+                    .append(bounds.top).append(",")
+                    .append(bounds.right).append(",")
+                    .append(bounds.bottom).append("]")
+                    .append(" click=").append(if (node.isClickable) 1 else 0)
+                    .append(" editable=").append(if (node.isEditable) 1 else 0)
+
+                if (text.isNotBlank()) output.append(" text=\"").append(text).append("\"")
+                if (desc.isNotBlank()) output.append(" desc=\"").append(desc).append("\"")
+                if (viewId.isNotBlank()) output.append(" view=\"").append(viewId).append("\"")
+                output.appendLine()
+
+                counter++
+            }
+
+            for (i in 0 until node.childCount) {
+                val child = node.getChild(i) ?: continue
+                queue.add(child)
+            }
+        }
+
+        collected.forEach { runCatching { it.recycle() } }
+        return output.toString().trim()
+    }
+
+    fun clickNodeBySnapshotId(nodeId: String): Boolean {
+        val rect = snapshotNodeBounds[nodeId] ?: return false
+        val centerX = (rect.left + rect.right) / 2f
+        val centerY = (rect.top + rect.bottom) / 2f
+        return clickOnScreen(centerX, centerY)
+    }
+
+    fun inputTextBySnapshotNodeId(nodeId: String, text: String): Boolean {
+        val rect = snapshotNodeBounds[nodeId] ?: return false
+        val centerX = (rect.left + rect.right) / 2f
+        val centerY = (rect.top + rect.bottom) / 2f
+
+        if (!clickOnScreen(centerX, centerY)) {
+            return false
+        }
+
+        Thread.sleep(120)
+        val rootNode = rootInActiveWindow ?: return false
+        val focusNode = rootNode.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+        val target = focusNode ?: findEditableNode(rootNode)
+
+        val result = target?.let { node ->
+            if (!node.isFocused) {
+                node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+            }
+            if (!node.isEditable) {
+                false
+            } else {
+                val args = Bundle().apply {
+                    putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
+                }
+                node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+            }
+        } ?: false
+
+        rootNode.recycle()
+        return result
     }
 
     fun inputText(text: String): Boolean {
@@ -263,25 +373,26 @@ class ClawAccessibilityService : AccessibilityService() {
                         val hardwareBuffer = screenshot.hardwareBuffer
                         val colorSpace = screenshot.colorSpace ?: ColorSpace.get(ColorSpace.Named.SRGB)
                         val bitmap = Bitmap.wrapHardwareBuffer(hardwareBuffer, colorSpace)
-                        val converted = bitmap?.copy(Bitmap.Config.ARGB_8888, false)
-                        bitmap?.recycle()
+                        val converted = bitmap?.copy(Bitmap.Config.ARGB_8888, false) ?: bitmap
                         hardwareBuffer.close()
 
                         if (converted != null) {
-                            val scaled = if (converted.width > 720) {
-                                val height = (converted.height * (720f / converted.width)).toInt().coerceAtLeast(1)
-                                Bitmap.createScaledBitmap(converted, 720, height, true).also { converted.recycle() }
+                            val scaled = if (converted.width > 900) {
+                                val height = (converted.height * (900f / converted.width)).toInt().coerceAtLeast(1)
+                                Bitmap.createScaledBitmap(converted, 900, height, true)
                             } else {
                                 converted
                             }
 
-                            val out = ByteArrayOutputStream()
-                            scaled.compress(Bitmap.CompressFormat.JPEG, 70, out)
-                            if (scaled !== converted) {
-                                scaled.recycle()
+                            val bytes = compressBitmapForModel(scaled)
+                            if (bytes.isNotEmpty()) {
+                                val base64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+                                dataRef.set("data:image/jpeg;base64,$base64")
                             }
-                            val base64 = android.util.Base64.encodeToString(out.toByteArray(), android.util.Base64.NO_WRAP)
-                            dataRef.set("data:image/jpeg;base64,$base64")
+
+                            if (scaled !== converted) scaled.recycle()
+                            if (converted !== bitmap) converted.recycle()
+                            if (bitmap !== converted) bitmap?.recycle()
                         }
                     }.onFailure {
                         Log.e(TAG, "captureScreenshotDataUrl failed", it)
@@ -298,6 +409,25 @@ class ClawAccessibilityService : AccessibilityService() {
 
         latch.await(timeoutMs, TimeUnit.MILLISECONDS)
         return dataRef.get()
+    }
+
+    private fun compressBitmapForModel(bitmap: Bitmap): ByteArray {
+        var quality = 78
+        var result = ByteArray(0)
+        repeat(4) {
+            val out = ByteArrayOutputStream()
+            bitmap.compress(Bitmap.CompressFormat.JPEG, quality, out)
+            result = out.toByteArray()
+            if (result.size <= 260 * 1024) return result
+            quality -= 10
+        }
+        return result
+    }
+
+    fun hasScreenshotCapability(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return false
+        val capabilities = serviceInfo?.capabilities ?: 0
+        return (capabilities and AccessibilityServiceInfo.CAPABILITY_CAN_TAKE_SCREENSHOT) != 0
     }
 
     fun performAction(action: Int): Boolean {
@@ -344,5 +474,19 @@ class ClawAccessibilityService : AccessibilityService() {
             val child = node.getChild(i) ?: continue
             collectTextRecursively(child, sb)
         }
+    }
+
+    private fun shouldIncludeInSnapshot(node: AccessibilityNodeInfo): Boolean {
+        if (!node.isVisibleToUser) return false
+        val hasText = !node.text.isNullOrBlank() || !node.contentDescription.isNullOrBlank()
+        val interactive = node.isClickable || node.isEditable || node.isCheckable || node.isScrollable
+        val hasId = !node.viewIdResourceName.isNullOrBlank()
+        return hasText || interactive || hasId
+    }
+
+    private fun normalizeText(value: String?, maxLen: Int = 80): String {
+        val text = value.orEmpty().replace("\n", " ").replace("\\s+".toRegex(), " ").trim()
+        if (text.length <= maxLen) return text
+        return text.take(maxLen) + "..."
     }
 }

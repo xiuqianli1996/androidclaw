@@ -88,8 +88,7 @@ class PhoneToolExecutor(
     @Suppress("UNCHECKED_CAST")
     override fun execute(parameters: Map<String, Any>): ToolResult {
         return try {
-            val args = parameters.values.toTypedArray()
-            val result = method.invoke(tools, *args)
+            val result = ToolInvokeUtil.invoke(method, tools, parameters)
             
             if (result is kotlin.coroutines.Continuation<*>) {
                 ToolResult.success("异步操作已启动")

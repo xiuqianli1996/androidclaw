@@ -9,11 +9,6 @@
         app:showAsAction="never" />
 
     <item
-        android:id="@+id/action_agent_settings"
-        android:title="Agent 配置"
-        app:showAsAction="never" />
-
-    <item
         android:id="@+id/action_tools"
         android:title="内置工具列表"
         app:showAsAction="never" />
@@ -31,6 +26,11 @@
     <item
         android:id="@+id/action_skills"
         android:title="技能管理"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/action_logs"
+        android:title="运行日志"
         app:showAsAction="never" />
 
 </menu>

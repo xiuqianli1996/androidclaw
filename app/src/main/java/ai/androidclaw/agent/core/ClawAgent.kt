@@ -8,6 +8,8 @@ import ai.androidclaw.agent.subagent.SubAgentResult
 import ai.androidclaw.agent.tools.ClawToolExecutor
 import ai.androidclaw.agent.tools.ToolRegistry
 import ai.androidclaw.agent.tools.ToolResult
+import com.google.gson.JsonElement
+import com.google.gson.JsonParser
 import dev.langchain4j.agent.tool.ToolExecutionRequest
 import dev.langchain4j.agent.tool.ToolSpecification
 import dev.langchain4j.data.message.AiMessage
@@ -19,7 +21,9 @@ import dev.langchain4j.data.message.ToolExecutionResultMessage
 import dev.langchain4j.data.message.UserMessage
 import dev.langchain4j.model.chat.ChatLanguageModel
 import dev.langchain4j.model.output.Response
+import dev.langchain4j.model.output.TokenUsage
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeout
 
 data class AgentRequest(
@@ -27,10 +31,29 @@ data class AgentRequest(
     val imageDataUrl: String? = null,
     val systemPrompt: String = "",
     val maxIterations: Int = 10,
+    val maxToolCallsPerIteration: Int = 2,
     val timeout: Long = 120000,
     val enableTools: Boolean = true,
     val enableSkills: Boolean = true,
-    val enableSubAgents: Boolean = true
+    val enableSubAgents: Boolean = true,
+    val traceLogger: ((AgentTraceEvent) -> Unit)? = null,
+    val shouldPause: (() -> Boolean)? = null
+)
+
+enum class AgentTraceType {
+    USER_MESSAGE,
+    LLM_REQUEST,
+    LLM_RESPONSE,
+    TOOL_CALL,
+    TOOL_RESULT,
+    ERROR,
+    FINAL
+}
+
+data class AgentTraceEvent(
+    val type: AgentTraceType,
+    val iteration: Int,
+    val content: String
 )
 
 data class AgentResponse(
@@ -38,7 +61,12 @@ data class AgentResponse(
     val toolCalls: List<ToolCallInfo>,
     val done: Boolean,
     val error: String? = null,
-    val iterations: Int = 0
+    val iterations: Int = 0,
+    val elapsedMs: Long = 0,
+    val inputTokens: Int? = null,
+    val outputTokens: Int? = null,
+    val totalTokens: Int? = null,
+    val finishReason: String? = null
 )
 
 data class ToolCallInfo(
@@ -61,7 +89,9 @@ class ClawAgent(
         private val PHONE_OBSERVATION_EXCLUDED_TOOLS = setOf(
             "phone_get_screenshot",
             "phone_get_screen_text",
-            "phone_wait"
+            "phone_get_ui_snapshot_compact",
+            "phone_wait",
+            "phone_wait_text"
         )
 
         private const val MEMORY_COMPACT_SYSTEM_PROMPT =
@@ -76,36 +106,51 @@ class ClawAgent(
     }
 
     private fun buildSystemPrompt(): String = buildString {
-        appendLine("你是一个高效、可靠的Android手机自动化助手，目标是高成功率完成真实手机任务（如微信发消息）。")
+        appendLine("你是 Android 手机执行代理。目标是在保证正确性的前提下，用最少步骤完成用户诉求。")
         appendLine()
-        appendLine("## 执行原则:")
-        appendLine("- 严格采用 计划->执行->观察->再计划 的循环")
-        appendLine("- 先输出简短计划（2-5步），每步执行后根据观测修正，不要盲点")
-        appendLine("- 优先理解页面截图和页面文本，再决定下一步")
-        appendLine("- 优先使用phone工具执行真实手机操作，避免冗余动作")
-        appendLine("- 在页面跳转、输入后，优先使用 phone_wait / phone_wait_text 等待加载")
-        appendLine("- 无法完成时明确说明原因并给出下一步")
-        appendLine("- 涉及微信发送时，优先流程：打开微信->定位会话->输入文本->点击发送或触发输入法回车")
+        appendLine("## 核心原则")
+        appendLine("1) 始终规划最短操作路径，避免无意义导航和重复操作。")
+        appendLine("2) 每轮只执行当前必要动作，动作后基于观测继续决策。")
+        appendLine("3) 未获得可验证结果前，不要提前结束任务。")
         appendLine()
-        appendLine("## 可用工具:")
+        appendLine("## 观测与交互优先级（严格遵循）")
+        appendLine("- 首选 `phone_get_ui_snapshot_compact` 做页面理解（低token）。")
+        appendLine("- 优先使用 `phone_click_node` 和 `phone_input_node` 执行基于结构化节点的交互。")
+        appendLine("- 仅在结构化快照无法覆盖/理解时，再使用截图。")
+        appendLine("- 使用截图点击时优先 `phone_click_coordinates_from_screenshot`，避免压缩后坐标偏移。")
+        appendLine("- `phone_get_screen_text` 与 `phone_click_text` 只作为最后兜底。")
+        appendLine("- 页面切换、输入、点击后应使用 `phone_wait` 或 `phone_wait_text` 等待界面稳定。")
+        appendLine()
+        appendLine("## 执行流程")
+        appendLine("- 先给出简要计划（2-5步，强调最短路径）。")
+        appendLine("- 当前轮执行后，结合最新观测修正下一步。")
+        appendLine("- 工具失败先进行一次等价重试；仍失败则给出明确阻塞点和下一步建议。")
+        appendLine()
+        appendLine("## 结束条件")
+        appendLine("- 仅在用户目标已完成且有观测证据时结束。")
+        appendLine("- 输出简洁：当前结果 + 是否完成 + 必要的后续建议。")
+        appendLine()
+        appendLine("## 可用工具")
         toolRegistry.getToolSpecifications().forEach { spec ->
             appendLine("- ${spec.name()}: ${spec.description()}")
         }
         appendLine()
-        appendLine(skillManager.getSkillForPrompt())
+        appendLine(skillManager.getSkillSummaryForPrompt())
         appendLine()
         appendLine(subAgentManager?.getSubAgentForPrompt() ?: "无可用子代理")
         appendLine()
         appendLine("## 记忆说明:")
-        appendLine("- 你可以访问之前的对话历史")
-        appendLine("- 必要时可以使用技能或子代理完成任务")
-        appendLine("- 如果记忆过多，系统会自动压缩")
+        appendLine("- 可以参考历史摘要，但以当前观测为准")
+        appendLine("- 可以使用技能或子代理完成复杂子任务")
+        appendLine("- 记忆过多时系统会自动压缩")
     }
 
     suspend fun execute(request: AgentRequest): AgentResponse {
+        val startedAt = System.currentTimeMillis()
         var currentIteration = 0
         val maxIterations = request.maxIterations
         val toolCalls = mutableListOf<ToolCallInfo>()
+        var tokenUsage: TokenUsage? = null
 
         val messages = mutableListOf<ChatMessage>()
         
@@ -116,57 +161,100 @@ class ClawAgent(
             messages.add(SystemMessage(systemPrompt))
         }
 
+        appendHistoricalContext(messages)
         messages.add(buildUserMessage(request))
         memory.addUserMessage(request.message)
+        request.traceLogger?.invoke(AgentTraceEvent(AgentTraceType.USER_MESSAGE, 0, request.message))
 
         return try {
             withTimeout(request.timeout) {
-                progressReporter("开始分析任务")
+                progressReporter("THINKING|开始分析任务")
                 while (currentIteration < maxIterations) {
+                    waitIfPaused(request, currentIteration)
                     currentIteration++
-                    progressReporter("第${currentIteration}轮决策")
+                    progressReporter("THINKING|第${currentIteration}轮决策")
                     
                     val chatMessages = messages.toMutableList()
-                    chatMessages.addAll(memory.getRecentMessages(10).map { 
-                        when (it.role) {
-                            "user" -> UserMessage(it.content)
-                            "assistant" -> AiMessage(it.content)
-                            "system" -> SystemMessage(it.content)
-                            else -> UserMessage(it.content)
-                        }
-                    })
 
                     val toolSpecs = if (request.enableTools) {
                         toolRegistry.getToolSpecifications()
                     } else emptyList()
 
                     val response: Response<AiMessage> = if (toolSpecs.isNotEmpty()) {
+                        request.traceLogger?.invoke(
+                            AgentTraceEvent(
+                                AgentTraceType.LLM_REQUEST,
+                                currentIteration,
+                                renderLlmRequest(chatMessages, toolSpecs)
+                            )
+                        )
                         chatModel.generate(chatMessages, toolSpecs)
                     } else {
+                        request.traceLogger?.invoke(
+                            AgentTraceEvent(
+                                AgentTraceType.LLM_REQUEST,
+                                currentIteration,
+                                renderLlmRequest(chatMessages, emptyList())
+                            )
+                        )
                         chatModel.generate(chatMessages)
                     }
+                    tokenUsage = tokenUsage?.add(response.tokenUsage()) ?: response.tokenUsage()
 
                     val aiMessage = response.content()
                     val toolExecutions = aiMessage.toolExecutionRequests()
+                    request.traceLogger?.invoke(
+                        AgentTraceEvent(
+                            AgentTraceType.LLM_RESPONSE,
+                            currentIteration,
+                            renderLlmResponse(aiMessage)
+                        )
+                    )
 
                     if (toolExecutions.isNullOrEmpty()) {
                         val answer = aiMessage.text().orEmpty()
-                        memory.addAssistantMessage(answer)
+                        val finalAnswer = answer.ifBlank { "任务已结束，但模型未返回文本结果。" }
+                        memory.addAssistantMessage(finalAnswer)
+                        progressReporter("DONE|任务执行完成")
+                        request.traceLogger?.invoke(
+                            AgentTraceEvent(AgentTraceType.FINAL, currentIteration, finalAnswer)
+                        )
                         return@withTimeout AgentResponse(
-                            message = answer,
+                            message = finalAnswer,
                             toolCalls = toolCalls,
                             done = true,
-                            iterations = currentIteration
+                            iterations = currentIteration,
+                            elapsedMs = System.currentTimeMillis() - startedAt,
+                            inputTokens = tokenUsage?.inputTokenCount(),
+                            outputTokens = tokenUsage?.outputTokenCount(),
+                            totalTokens = tokenUsage?.totalTokenCount(),
+                            finishReason = response.finishReason()?.name
                         )
                     }
 
-                    for (toolExecution in toolExecutions) {
+                    val limitedExecutions = toolExecutions.take(request.maxToolCallsPerIteration.coerceIn(1, 5))
+                    for (toolExecution in limitedExecutions) {
+                        waitIfPaused(request, currentIteration)
                         val toolName = toolExecution.name()
                         val toolArgs = parseArguments(toolExecution.arguments())
-                        progressReporter("执行工具: $toolName")
+                        progressReporter("TOOL|$toolName|${toolExecution.arguments()}")
+                        request.traceLogger?.invoke(
+                            AgentTraceEvent(
+                                AgentTraceType.TOOL_CALL,
+                                currentIteration,
+                                "$toolName ${toolExecution.arguments()}"
+                            )
+                        )
 
                         val result = executeTool(toolName, toolArgs)
                         val observedResult = enrichPhoneToolResult(toolName, result)
+                        request.traceLogger?.invoke(
+                            AgentTraceEvent(
+                                AgentTraceType.TOOL_RESULT,
+                                currentIteration,
+                                "$toolName => ${if (observedResult.success) "success" else "error"}: ${truncateText(observedResult.result.ifBlank { observedResult.error.orEmpty() }, 4000)}"
+                            )
+                        )
                         val toolCallInfo = ToolCallInfo(
                             name = toolName,
                             arguments = toolExecution.arguments(),
@@ -195,45 +283,59 @@ class ClawAgent(
                         )
                     }
 
-                    if (shouldContinue(aiMessage.text(), toolCalls)) {
-                        continue
-                    } else {
-                        val answer = aiMessage.text().orEmpty()
-                        memory.addAssistantMessage(answer)
-                        progressReporter("任务执行完成")
-                        return@withTimeout AgentResponse(
-                            message = answer,
-                            toolCalls = toolCalls,
-                            done = true,
-                            iterations = currentIteration
+                    if (toolExecutions.size > limitedExecutions.size) {
+                        messages.add(
+                            SystemMessage(
+                                "本轮模型请求了过多工具调用，系统仅执行了前${limitedExecutions.size}个。" +
+                                    "请基于结果继续下一轮规划。"
+                            )
                         )
                     }
+                    continue
                 }
 
                 AgentResponse(
                     message = "达到最大迭代次数",
                     toolCalls = toolCalls,
                     done = false,
-                    iterations = currentIteration
+                    iterations = currentIteration,
+                    elapsedMs = System.currentTimeMillis() - startedAt,
+                    inputTokens = tokenUsage?.inputTokenCount(),
+                    outputTokens = tokenUsage?.outputTokenCount(),
+                    totalTokens = tokenUsage?.totalTokenCount()
                 )
             }
         } catch (e: TimeoutCancellationException) {
-            progressReporter("任务超时")
+            progressReporter("ERROR|任务超时")
+            request.traceLogger?.invoke(
+                AgentTraceEvent(AgentTraceType.ERROR, currentIteration, "任务超时: ${e.message}")
+            )
             AgentResponse(
                 message = "执行超时",
                 toolCalls = toolCalls,
                 done = false,
                 error = "Timeout after ${request.timeout}ms",
-                iterations = currentIteration
+                iterations = currentIteration,
+                elapsedMs = System.currentTimeMillis() - startedAt,
+                inputTokens = tokenUsage?.inputTokenCount(),
+                outputTokens = tokenUsage?.outputTokenCount(),
+                totalTokens = tokenUsage?.totalTokenCount()
             )
         } catch (e: Exception) {
-            progressReporter("执行异常: ${e.message ?: "unknown"}")
+            progressReporter("ERROR|执行异常: ${e.message ?: "unknown"}")
+            request.traceLogger?.invoke(
+                AgentTraceEvent(AgentTraceType.ERROR, currentIteration, "执行异常: ${e.message ?: "unknown"}")
+            )
             AgentResponse(
                 message = "执行错误",
                 toolCalls = toolCalls,
                 done = false,
                 error = e.message,
-                iterations = currentIteration
+                iterations = currentIteration,
+                elapsedMs = System.currentTimeMillis() - startedAt,
+                inputTokens = tokenUsage?.inputTokenCount(),
+                outputTokens = tokenUsage?.outputTokenCount(),
+                totalTokens = tokenUsage?.totalTokenCount()
             )
         }
     }
@@ -248,32 +350,12 @@ class ClawAgent(
 
     private fun parseArguments(arguments: String?): Map<String, Any> {
         if (arguments.isNullOrBlank()) return emptyMap()
-        
         return try {
-            val cleanArgs = arguments
-                .trim()
-                .removePrefix("{")
-                .removeSuffix("}")
-            
-            if (cleanArgs.isBlank()) return emptyMap()
-            
-            val result = mutableMapOf<String, Any>()
-            val regex = """"([^"]+)"\s*:\s*"?([^",}]*)"?""".toRegex()
-            
-            regex.findAll(cleanArgs).forEach { match ->
-                val key = match.groupValues[1].trim()
-                val value = match.groupValues[2].trim()
-                result[key] = value
-            }
-            
-            result
+            val obj = JsonParser.parseString(arguments).asJsonObject
+            obj.entrySet().associate { (key, value) -> key to jsonToAny(value) }
         } catch (e: Exception) {
             emptyMap()
         }
-    }
-
-    private fun shouldContinue(lastResponse: String?, toolCalls: List<ToolCallInfo>): Boolean {
-        return toolCalls.isNotEmpty() && lastResponse.isNullOrBlank()
     }
 
     fun getAvailableTools(): List<String> = toolRegistry.getToolNames().toList()
@@ -339,15 +421,24 @@ class ClawAgent(
         if (!toolName.startsWith("phone_")) return originalResult
         if (toolName in PHONE_OBSERVATION_EXCLUDED_TOOLS) return originalResult
 
-        val screenshot = toolRegistry.execute("phone_get_screenshot", emptyMap())
-        val observation = if (screenshot.success) {
-            "\n[页面截图]\n${screenshot.result}"
+        if (originalResult.success) {
+            toolRegistry.execute("phone_wait", mapOf("milliseconds" to 700L))
+        }
+
+        val snapshot = toolRegistry.execute("phone_get_ui_snapshot_compact", mapOf("maxNodes" to 80))
+        val observation = if (snapshot.success) {
+            "\n[页面结构快照]\n${snapshot.result}"
         } else {
-            val screenText = toolRegistry.execute("phone_get_screen_text", emptyMap())
-            if (screenText.success) {
-                "\n[页面文本]\n${screenText.result}"
+            val screenshot = toolRegistry.execute("phone_get_screenshot", emptyMap())
+            if (screenshot.success) {
+                "\n[页面截图]\n${screenshot.result}"
             } else {
-                "\n[页面观测失败] screenshot=${screenshot.error}; text=${screenText.error}"
+                val screenText = toolRegistry.execute("phone_get_screen_text", emptyMap())
+                if (screenText.success) {
+                    "\n[页面文本]\n${screenText.result}"
+                } else {
+                    "\n[页面观测失败] snapshot=${snapshot.error}; screenshot=${screenshot.error}; text=${screenText.error}"
+                }
             }
         }
 
@@ -376,6 +467,80 @@ class ClawAgent(
         val assistantMessages = items.count { it.role == "assistant" }
         val toolMessages = items.count { it.role == "tool" }
         return "- 用户消息: $userMessages 条\n- 助手消息: $assistantMessages 条\n- 工具结果: $toolMessages 条"
+    }
+
+    private fun appendHistoricalContext(messages: MutableList<ChatMessage>) {
+        val history = memory.getRecentMessages(8)
+        history.forEach {
+            val message = when (it.role) {
+                "user" -> UserMessage(it.content)
+                "assistant" -> AiMessage(it.content)
+                "system" -> SystemMessage(it.content)
+                else -> UserMessage(it.content)
+            }
+            messages.add(message)
+        }
+    }
+
+    private fun jsonToAny(element: JsonElement): Any {
+        if (element.isJsonNull) return ""
+        if (element.isJsonPrimitive) {
+            val p = element.asJsonPrimitive
+            return when {
+                p.isBoolean -> p.asBoolean
+                p.isNumber -> {
+                    val num = p.asString
+                    if (num.contains('.')) num.toDoubleOrNull() ?: num else num.toLongOrNull() ?: num
+                }
+                else -> p.asString
+            }
+        }
+        if (element.isJsonArray) {
+            return element.asJsonArray.map { jsonToAny(it) }
+        }
+        return element.asJsonObject.entrySet().associate { (k, v) -> k to jsonToAny(v) }
+    }
+
+    private suspend fun waitIfPaused(request: AgentRequest, iteration: Int) {
+        var reported = false
+        while (request.shouldPause?.invoke() == true) {
+            if (!reported) {
+                progressReporter("THINKING|执行已暂停")
+                request.traceLogger?.invoke(
+                    AgentTraceEvent(AgentTraceType.FINAL, iteration, "Execution paused")
+                )
+                reported = true
+            }
+            delay(250)
+        }
+        if (reported) {
+            progressReporter("THINKING|继续执行")
+        }
+    }
+
+    private fun truncateText(text: String, max: Int): String {
+        return if (text.length <= max) text else text.take(max) + "..."
+    }
+
+    private fun renderLlmRequest(messages: List<ChatMessage>, specs: List<ToolSpecification>): String {
+        val tools = if (specs.isEmpty()) "(none)" else specs.joinToString(",") { it.name() }
+        val msg = messages.joinToString("\n") { m ->
+            val role = m.javaClass.simpleName
+            "[$role] ${truncateText(m.toString(), 1200)}"
+        }
+        return "tools=$tools\n$msg"
+    }
+
+    private fun renderLlmResponse(aiMessage: AiMessage): String {
+        val text = truncateText(aiMessage.text().orEmpty(), 2000)
+        val tools = aiMessage.toolExecutionRequests()?.joinToString("\n") {
+            "${it.name()} ${it.arguments()}"
+        }.orEmpty()
+        return if (tools.isBlank()) {
+            "text=$text"
+        } else {
+            "text=$text\ntool_requests:\n$tools"
+        }
     }
 }
 

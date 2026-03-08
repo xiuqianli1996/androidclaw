@@ -20,6 +20,7 @@ import ai.androidclaw.agent.core.ModelProvider
 import ai.androidclaw.config.ConfigManager
 import ai.androidclaw.databinding.ActivitySettingsBinding
 import ai.androidclaw.feishu.FeishuBotService
+import ai.androidclaw.feishu.FeishuConfig
 import dev.langchain4j.data.message.UserMessage
 
 class SettingsActivity : AppCompatActivity() {
@@ -47,20 +48,21 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     private fun setupFeishuCard() {
-        updateFeishuStatus()
-        
-        binding.cardFeishu.setOnClickListener {
-            startActivity(Intent(this, FeishuSettingsActivity::class.java))
+        val config = feishuBotService.getConfig()
+        binding.switchFeishuEnabled.isChecked = config.enabled
+        binding.etFeishuAppId.setText(config.appId)
+        binding.etFeishuAppSecret.setText(config.appSecret)
+        binding.etFeishuVerificationToken.setText(config.verificationToken)
+        binding.etFeishuEncryptKey.setText(config.encryptKey)
+
+        binding.btnFeishuHealth.setOnClickListener {
+            showFeishuHealthStatus()
         }
     }
 
     private fun updateFeishuStatus() {
         val config = feishuBotService.getConfig()
-        binding.tvFeishuStatus.text = if (config.enabled) {
-            if (config.appId.isNotBlank()) "已启用" else "未配置"
-        } else {
-            "未启用"
-        }
+        binding.switchFeishuEnabled.isChecked = config.enabled
     }
 
     override fun onResume() {
@@ -115,6 +117,14 @@ class SettingsActivity : AppCompatActivity() {
         binding.etMaxTokens.addTextChangedListener {
             binding.tilMaxTokens.error = null
         }
+
+        binding.etAgentSystemPrompt.addTextChangedListener {
+            binding.tilAgentSystemPrompt.error = null
+        }
+
+        binding.etAgentMaxIterations.addTextChangedListener {
+            binding.tilAgentMaxIterations.error = null
+        }
     }
 
     private fun loadConfig() {
@@ -131,6 +141,8 @@ class SettingsActivity : AppCompatActivity() {
         binding.etBaseUrl.setText(config.baseUrl)
         binding.etTemperature.setText(config.temperature.toString())
         binding.etMaxTokens.setText(config.maxTokens.toString())
+        binding.etAgentSystemPrompt.setText(configManager.getAgentSystemPrompt())
+        binding.etAgentMaxIterations.setText(configManager.getAgentMaxIterations().toString())
 
         updateBaseUrlHint()
     }
@@ -181,6 +193,23 @@ class SettingsActivity : AppCompatActivity() {
             isValid = false
         }
 
+        val maxIterations = binding.etAgentMaxIterations.text?.toString()?.toIntOrNull()
+        if (maxIterations == null || maxIterations !in 1..50) {
+            binding.tilAgentMaxIterations.error = "Max Iterations 必须在 1-50 之间"
+            isValid = false
+        }
+
+        if (binding.switchFeishuEnabled.isChecked) {
+            if (binding.etFeishuAppId.text.isNullOrBlank()) {
+                binding.tilFeishuAppId.error = "Feishu App ID 不能为空"
+                isValid = false
+            }
+            if (binding.etFeishuAppSecret.text.isNullOrBlank()) {
+                binding.tilFeishuAppSecret.error = "Feishu App Secret 不能为空"
+                isValid = false
+            }
+        }
+
         return isValid
     }
 
@@ -195,11 +224,37 @@ class SettingsActivity : AppCompatActivity() {
         )
 
         configManager.saveModelConfig(config)
+        configManager.saveAgentConfig(
+            binding.etAgentSystemPrompt.text?.toString()?.trim().orEmpty(),
+            binding.etAgentMaxIterations.text?.toString()?.toIntOrNull() ?: 10
+        )
+
+        feishuBotService.saveConfig(
+            FeishuConfig(
+                enabled = binding.switchFeishuEnabled.isChecked,
+                appId = binding.etFeishuAppId.text?.toString()?.trim().orEmpty(),
+                appSecret = binding.etFeishuAppSecret.text?.toString()?.trim().orEmpty(),
+                verificationToken = binding.etFeishuVerificationToken.text?.toString()?.trim().orEmpty(),
+                encryptKey = binding.etFeishuEncryptKey.text?.toString()?.trim().orEmpty(),
+                webhookUrl = ""
+            )
+        )
+        feishuBotService.setEnabled(binding.switchFeishuEnabled.isChecked)
+
         Toast.makeText(this, "配置已保存", Toast.LENGTH_SHORT).show()
         
         AgentManager.getInstance(this).initialize(config)
         
         finish()
+    }
+
+    private fun showFeishuHealthStatus() {
+        val status = feishuBotService.getHealthStatus()
+        AlertDialog.Builder(this)
+            .setTitle("飞书连接状态")
+            .setMessage(status)
+            .setPositiveButton("关闭", null)
+            .show()
     }
 
     private fun testConnection() {

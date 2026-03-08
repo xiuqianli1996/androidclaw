@@ -1,14 +1,12 @@
 package ai.androidclaw.feishu
 
-import ai.androidclaw.agent.AgentManager
-import ai.androidclaw.db.AppDatabase
-import ai.androidclaw.db.entity.Conversation
-import ai.androidclaw.db.entity.Message
-import ai.androidclaw.db.entity.MessageRole
-import ai.androidclaw.config.ConfigManager
+import ai.androidclaw.channel.ChannelEngine
+import ai.androidclaw.channel.ChannelIncomingMessage
+import ai.androidclaw.channel.ChannelOutgoingMessage
+import ai.androidclaw.channel.ChannelTransport
+import ai.androidclaw.agent.logging.AgentLogManager
 import android.content.Context
 import android.util.Log
-import com.google.gson.Gson
 import com.google.gson.JsonParser
 import com.lark.oapi.service.im.v1.model.EventMessage
 import com.lark.oapi.service.im.v1.model.P2MessageReceiveV1
@@ -21,15 +19,22 @@ class FeishuBotService(context: Context) {
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val feishuConfigManager = FeishuConfigManager.getInstance(context)
-    private val configManager = ConfigManager.getInstance(context)
-    private val agentManager = AgentManager.getInstance(context)
-    private val database = AppDatabase.getInstance(context)
+    private val channelEngine = ChannelEngine.getInstance(context)
+    private val logManager = AgentLogManager.getInstance(context)
 
     private var wsClient: FeishuWebSocketClient? = null
     private val messageHandler = FeishuMessageHandler()
-    private val gson = Gson()
     @Volatile
     private var wsConnected = false
+    @Volatile
+    private var lastEventAt: Long = 0L
+    @Volatile
+    private var lastError: String = ""
+    @Volatile
+    private var lastMessageId: String = ""
+    @Volatile
+    private var reconnectCount: Int = 0
+    private val processedMessageIds = LinkedHashMap<String, Long>()
 
     companion object {
         private const val TAG = "FeishuBotService"
@@ -88,15 +93,19 @@ class FeishuBotService(context: Context) {
 
     private fun connectWebSocket(config: FeishuConfig) {
         disconnectWebSocket()
+        reconnectCount += 1
 
         wsClient = FeishuWebSocketClient(config, object : FeishuWebSocketClient.FeishuMessageListener {
             override fun onConnected() {
                 wsConnected = true
+                lastError = ""
+                logChannel("feishu_ws", "WS", "connected")
                 Log.d(TAG, "WebSocket connected")
             }
 
             override fun onDisconnected() {
                 wsConnected = false
+                logChannel("feishu_ws", "WS", "disconnected")
                 Log.d(TAG, "WebSocket disconnected")
             }
 
@@ -106,6 +115,8 @@ class FeishuBotService(context: Context) {
 
             override fun onError(error: String) {
                 wsConnected = false
+                lastError = error
+                logChannel("feishu_ws", "WS_ERROR", error)
                 Log.e(TAG, "WebSocket error: $error")
             }
         })
@@ -136,6 +147,12 @@ class FeishuBotService(context: Context) {
         val message = wsMessage.event?.message ?: return
         val chatId = message.chatId ?: return
         val messageId = message.messageId ?: return
+        if (isDuplicateMessage(messageId)) {
+            Log.d(TAG, "Duplicate message ignored: $messageId")
+            return
+        }
+        lastEventAt = System.currentTimeMillis()
+        lastMessageId = messageId
 
         scope.launch {
             val textContent = extractTextContent(message)
@@ -145,43 +162,31 @@ class FeishuBotService(context: Context) {
                 return@launch
             }
 
-            Log.d(TAG, "Received message: $textContent")
-            val conversationId = getOrCreateConversation(chatId)
+            routeIncomingToChannel(chatId, messageId, textContent)
+        }
+    }
 
-            val userMessage = Message(
-                conversation_id = conversationId,
-                role = MessageRole.USER.value,
-                content = textContent,
-                message_type = "text",
-                metadata = """{"message_id":"$messageId","chat_id":"$chatId"}"""
-            )
-            database.messageDao().insert(userMessage)
+    private fun routeIncomingToChannel(chatId: String, messageId: String, text: String) {
+        logChannel(chatId, "INCOMING", "chat=$chatId messageId=$messageId text=$text")
+        channelEngine.handleIncoming(
+            incoming = ChannelIncomingMessage(
+                channelType = "feishu",
+                channelId = chatId,
+                senderId = messageId,
+                messageId = messageId,
+                text = text,
+                metadata = """{"chat_id":"$chatId","message_id":"$messageId"}"""
+            ),
+            transport = object : ChannelTransport {
+                override val channelType: String = "feishu"
 
-            agentManager.execute(
-                textContent,
-                systemPrompt = configManager.getAgentSystemPrompt(),
-                maxIterations = configManager.getAgentMaxIterations()
-            ) { response ->
-                scope.launch {
-                    val replyContent = if (response.error != null) {
-                        "处理失败: ${response.error}"
-                    } else {
-                        response.message
-                    }
-
-                    val assistantMessage = Message(
-                        conversation_id = conversationId,
-                        role = MessageRole.ASSISTANT.value,
-                        content = response.message,
-                        message_type = "text",
-                        tool_calls = if (response.toolCalls.isNotEmpty()) gson.toJson(response.toolCalls) else null
-                    )
-                    database.messageDao().insert(assistantMessage)
-
-                    sendMessage(chatId, replyContent, messageId)
+                override suspend fun send(message: ChannelOutgoingMessage): Result<String> {
+                    logChannel(chatId, "OUTGOING", "chat=$chatId replyTo=${message.replyToMessageId} text=${message.text}")
+                    sendMessage(chatId, message.text, message.replyToMessageId)
+                    return Result.success(message.replyToMessageId ?: "")
                 }
             }
-        }
+        )
     }
 
     private fun extractTextContent(message: EventMessage): String? {
@@ -218,20 +223,12 @@ class FeishuBotService(context: Context) {
 
         result.fold(
             onSuccess = { Log.d(TAG, "Message sent successfully") },
-            onFailure = { Log.e(TAG, "Failed to send message: ${it.message}") }
+            onFailure = {
+                lastError = it.message ?: "send failed"
+                logChannel(chatId, "ERROR", "send failed: ${lastError}")
+                Log.e(TAG, "Failed to send message: ${it.message}")
+            }
         )
-    }
-
-    private suspend fun getOrCreateConversation(chatId: String): Long {
-        val existing = database.conversationDao().getConversationByChannel("feishu", chatId)
-        if (existing != null) return existing.id
-
-        val newConversation = Conversation(
-            title = "Feishu Chat $chatId",
-            channel_type = "feishu",
-            channel_id = chatId
-        )
-        return database.conversationDao().insert(newConversation)
     }
 
     fun handleEvent(eventJson: String) {
@@ -269,45 +266,60 @@ class FeishuBotService(context: Context) {
         }
 
         val messageId = message.messageId ?: return
+        if (isDuplicateMessage(messageId)) {
+            Log.d(TAG, "Duplicate legacy message ignored: $messageId")
+            return
+        }
+        lastEventAt = System.currentTimeMillis()
+        lastMessageId = messageId
         Log.d(TAG, "Received message: $textContent")
+        routeIncomingToChannel(chatId, messageId, textContent)
+    }
 
-        val conversationId = getOrCreateConversation(chatId)
-        val userMessage = Message(
-            conversation_id = conversationId,
-            role = MessageRole.USER.value,
-            content = textContent,
-            message_type = "text",
-            metadata = """{"chat_id":"$chatId","message_id":"$messageId"}"""
-        )
-        database.messageDao().insert(userMessage)
+    fun getHealthStatus(): String {
+        val configured = feishuConfigManager.isConfigured()
+        val enabled = feishuConfigManager.isEnabled()
+        val lastEvent = if (lastEventAt > 0) java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault())
+            .format(java.util.Date(lastEventAt)) else "-"
 
-        agentManager.execute(
-            textContent,
-            systemPrompt = configManager.getAgentSystemPrompt(),
-            maxIterations = configManager.getAgentMaxIterations()
-        ) { response ->
-            scope.launch {
-                val replyContent = if (response.error != null) {
-                    "处理失败: ${response.error}"
-                } else {
-                    response.message
-                }
+        return buildString {
+            appendLine("configured: $configured")
+            appendLine("enabled: $enabled")
+            appendLine("wsConnected: $wsConnected")
+            appendLine("reconnectCount: $reconnectCount")
+            appendLine("lastEventAt: $lastEvent")
+            appendLine("lastMessageId: ${if (lastMessageId.isBlank()) "-" else lastMessageId}")
+            appendLine("lastError: ${if (lastError.isBlank()) "-" else lastError}")
+        }.trim()
+    }
 
-                val assistantMessage = Message(
-                    conversation_id = conversationId,
-                    role = MessageRole.ASSISTANT.value,
-                    content = response.message,
-                    message_type = "text",
-                    tool_calls = if (response.toolCalls.isNotEmpty()) gson.toJson(response.toolCalls) else null
-                )
-                database.messageDao().insert(assistantMessage)
-
-                sendMessage(chatId, replyContent, messageId)
+    private fun isDuplicateMessage(messageId: String): Boolean {
+        synchronized(processedMessageIds) {
+            val now = System.currentTimeMillis()
+            val cutoff = now - 10 * 60 * 1000L
+            val iterator = processedMessageIds.entries.iterator()
+            while (iterator.hasNext()) {
+                if (iterator.next().value < cutoff) iterator.remove()
             }
+
+            if (processedMessageIds.containsKey(messageId)) {
+                logChannel("feishu_dedup", "DEDUP", "drop duplicate messageId=$messageId")
+                return true
+            }
+            processedMessageIds[messageId] = now
+            if (processedMessageIds.size > 500) {
+                val first = processedMessageIds.entries.firstOrNull()?.key
+                if (first != null) processedMessageIds.remove(first)
+            }
+            return false
         }
     }
 
     fun release() {
         disconnectWebSocket()
+    }
+
+    private fun logChannel(channelId: String, section: String, content: String) {
+        logManager.appendForChannel("feishu", channelId.ifBlank { "unknown" }, section, content)
     }
 }

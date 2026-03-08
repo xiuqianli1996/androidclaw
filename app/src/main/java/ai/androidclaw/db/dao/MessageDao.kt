@@ -47,6 +47,9 @@ interface MessageDao {
     @Query("UPDATE messages SET tool_results = :toolResults WHERE id = :messageId")
     suspend fun updateToolResults(messageId: Long, toolResults: String)
 
+    @Query("UPDATE messages SET content = :content WHERE id = :messageId")
+    suspend fun updateContent(messageId: Long, content: String)
+
     @Query("SELECT * FROM messages WHERE conversation_id = :conversationId AND content LIKE '%' || :query || '%' ORDER BY timestamp DESC")
     suspend fun searchMessages(conversationId: Long, query: String): List<Message>
 }

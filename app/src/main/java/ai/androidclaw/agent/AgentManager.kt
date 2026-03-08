@@ -4,12 +4,15 @@ import android.content.Context
 import android.util.Log
 import ai.androidclaw.agent.core.AgentRequest
 import ai.androidclaw.agent.core.AgentResponse
+import ai.androidclaw.agent.core.AgentTraceEvent
+import ai.androidclaw.agent.core.AgentTraceType
 import ai.androidclaw.agent.core.ClawAgent
 import ai.androidclaw.agent.core.ClawAgentBuilder
 import ai.androidclaw.agent.core.ModelConfig
 import ai.androidclaw.agent.memory.AgentMemory
 import ai.androidclaw.agent.skills.SkillManager
 import ai.androidclaw.agent.skills.Skill
+import ai.androidclaw.agent.skills.SkillToolFactory
 import ai.androidclaw.agent.subagent.SubAgentManager
 import ai.androidclaw.agent.subagent.SubAgentConfig
 import ai.androidclaw.agent.subagent.SubAgentResult
@@ -42,6 +45,8 @@ class AgentManager private constructor(
 
     private var currentJob: Job? = null
     private var isInitialized = false
+    @Volatile
+    private var paused = false
 
     private var apiKey: String = ""
     private var modelName: String = "gpt-4o-mini"
@@ -71,6 +76,7 @@ class AgentManager private constructor(
         skillManager = SkillManager()
         
         ToolFactory(toolRegistry).registerAllTools()
+        SkillToolFactory.register(toolRegistry, skillManager)
         registerMcpTools()
         
         agent = ClawAgentBuilder()
@@ -79,7 +85,26 @@ class AgentManager private constructor(
             .memory(memory)
             .skillManager(skillManager)
             .progressReporter { msg ->
-                runCatching { overlayManager.update(msg) }
+                runCatching {
+                    when {
+                        msg.startsWith("THINKING|") -> {
+                            overlayManager.showThinking(msg.substringAfter("THINKING|"))
+                        }
+                        msg.startsWith("TOOL|") -> {
+                            val payload = msg.substringAfter("TOOL|")
+                            val toolName = payload.substringBefore("|")
+                            val args = payload.substringAfter("|", "")
+                            overlayManager.showToolExecution(toolName, args)
+                        }
+                        msg.startsWith("DONE|") -> {
+                            overlayManager.update(msg.substringAfter("DONE|"))
+                        }
+                        msg.startsWith("ERROR|") -> {
+                            overlayManager.update(msg.substringAfter("ERROR|"))
+                        }
+                        else -> overlayManager.update(msg)
+                    }
+                }
             }
             .build()
 
@@ -128,6 +153,7 @@ class AgentManager private constructor(
         imageDataUrl: String? = null,
         systemPrompt: String = "",
         maxIterations: Int = 10,
+        traceLogger: ((AgentTraceEvent) -> Unit)? = null,
         callback: (AgentResponse) -> Unit
     ) {
         if (!isInitialized) {
@@ -155,7 +181,9 @@ class AgentManager private constructor(
                     message = message,
                     imageDataUrl = imageDataUrl,
                     systemPrompt = systemPrompt,
-                    maxIterations = maxIterations
+                    maxIterations = maxIterations,
+                    traceLogger = traceLogger,
+                    shouldPause = { paused }
                 )
 
                 val response = agent.execute(request)
@@ -177,6 +205,16 @@ class AgentManager private constructor(
             }
         }
     }
+
+    fun pauseExecution() {
+        paused = true
+    }
+
+    fun resumeExecution() {
+        paused = false
+    }
+
+    fun isPaused(): Boolean = paused
 
     suspend fun executeAsync(
         message: String,

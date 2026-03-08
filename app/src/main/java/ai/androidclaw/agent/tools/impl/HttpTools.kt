@@ -2,6 +2,7 @@ package ai.androidclaw.agent.tools.impl
 
 import ai.androidclaw.agent.tools.ClawToolExecutor
 import ai.androidclaw.agent.tools.ToolCategory
+import ai.androidclaw.agent.tools.ToolInvokeUtil
 import ai.androidclaw.agent.tools.ToolResult
 import dev.langchain4j.agent.tool.Tool
 import dev.langchain4j.agent.tool.ToolSpecification
@@ -192,8 +193,7 @@ class HttpToolExecutor(
 
     override fun execute(parameters: Map<String, Any>): ToolResult {
         return try {
-            val args = parameters.values.toTypedArray()
-            val result = method.invoke(tools, *args)
+            val result = ToolInvokeUtil.invoke(method, tools, parameters)
             if (result is ToolResult) result
             else ToolResult.success(result?.toString() ?: "操作完成")
         } catch (e: Exception) {

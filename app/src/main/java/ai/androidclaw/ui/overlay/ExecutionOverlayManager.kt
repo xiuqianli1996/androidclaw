@@ -20,63 +20,116 @@ class ExecutionOverlayManager private constructor(context: Context) {
     private val windowManager = appContext.getSystemService(Context.WINDOW_SERVICE) as WindowManager
 
     private var overlayView: TextView? = null
-    private var isVisible = false
+    private var shouldDisplay = false
+    private var hiddenByCaptureCount = 0
+    private var lastMessage: String = ""
+    private var lastThinking: String = ""
+    private var lastTool: String = ""
+    private var currentStatus: String = ""
 
     fun show(message: String) {
         runOnMainSync {
             if (!canShowOverlay()) return@runOnMainSync
-            if (overlayView == null) {
-                overlayView = TextView(appContext).apply {
-                    setTextColor(Color.WHITE)
-                    setBackgroundColor(0xCC000000.toInt())
-                    textSize = 12f
-                    setPadding(24, 16, 24, 16)
-                }
-
-                windowManager.addView(overlayView, buildLayoutParams())
-            }
-
+            ensureOverlayView()
+            shouldDisplay = true
+            lastMessage = message
+            applyOverlayVisibility()
             overlayView?.text = message
-            overlayView?.visibility = View.VISIBLE
-            isVisible = true
         }
     }
 
-    fun update(message: String) {
-        runOnMainSync {
-            if (!isVisible) return@runOnMainSync
-            overlayView?.text = message
+    fun showThinking(step: String) {
+        lastThinking = compactArgs(step, 180)
+        if (currentStatus.isBlank()) {
+            currentStatus = "思考中"
         }
+        renderCombined()
+    }
+
+    fun showToolExecution(toolName: String, args: String) {
+        val compactArgs = compactArgs(args, 200)
+        lastTool = if (compactArgs.isBlank()) {
+            toolName
+        } else {
+            "$toolName($compactArgs)"
+        }
+        currentStatus = "执行工具中"
+        renderCombined()
+    }
+
+    fun showCurrentStatus(status: String) {
+        currentStatus = compactArgs(status, 120)
+        renderCombined()
+    }
+
+    private fun compactArgs(args: String, maxLen: Int): String {
+        val singleLine = args.replace("\n", " ").replace("\\s+".toRegex(), " ").trim()
+        if (singleLine.length <= maxLen) return singleLine
+        return singleLine.take(maxLen) + "..."
+    }
+
+    private fun renderCombined() {
+        val text = buildString {
+            appendLine("当前: ${if (currentStatus.isBlank()) "待命" else currentStatus}")
+            if (lastTool.isNotBlank()) appendLine("上次工具: $lastTool")
+            if (lastThinking.isNotBlank()) appendLine("上次思考: $lastThinking")
+        }.trim()
+        show(text)
+    }
+
+    fun update(message: String) {
+        showCurrentStatus(message)
     }
 
     fun hide() {
         runOnMainSync {
+            shouldDisplay = false
+            hiddenByCaptureCount = 0
             overlayView?.let {
                 runCatching { windowManager.removeView(it) }
             }
             overlayView = null
-            isVisible = false
         }
     }
 
     fun <T> runWithCaptureHidden(block: () -> T): T {
-        val shouldRestore = runOnMainSyncWithResult {
-            val visible = isVisible
-            overlayView?.visibility = View.GONE
-            isVisible = false
-            visible
+        runOnMainSync {
+            if (!shouldDisplay || overlayView == null) return@runOnMainSync
+            hiddenByCaptureCount += 1
+            applyOverlayVisibility()
         }
 
         return try {
             block()
         } finally {
-            if (shouldRestore) {
-                runOnMainSync {
-                    overlayView?.visibility = View.VISIBLE
-                    isVisible = true
+            runOnMainSync {
+                if (hiddenByCaptureCount > 0) {
+                    hiddenByCaptureCount -= 1
+                }
+                if (shouldDisplay && overlayView != null) {
+                    overlayView?.text = lastMessage
+                    applyOverlayVisibility()
                 }
             }
         }
+    }
+
+    private fun ensureOverlayView() {
+            if (overlayView == null) {
+                overlayView = TextView(appContext).apply {
+                    setTextColor(Color.WHITE)
+                    setBackgroundColor(0xCC000000.toInt())
+                    textSize = 12f
+                    maxWidth = (appContext.resources.displayMetrics.widthPixels * 0.75f).toInt()
+                    setPadding(24, 16, 24, 16)
+                }
+
+                windowManager.addView(overlayView, buildLayoutParams())
+            }
+    }
+
+    private fun applyOverlayVisibility() {
+        overlayView?.visibility = if (shouldDisplay && hiddenByCaptureCount == 0) View.VISIBLE else View.GONE
     }
 
     private fun canShowOverlay(): Boolean {
@@ -118,24 +171,6 @@ class ExecutionOverlayManager private constructor(context: Context) {
             }
         }
         latch.await()
-    }
-
-    private fun <T> runOnMainSyncWithResult(block: () -> T): T {
-        if (Looper.myLooper() == Looper.getMainLooper()) {
-            return block()
-        }
-        var result: T? = null
-        val latch = CountDownLatch(1)
-        mainHandler.post {
-            try {
-                result = block()
-            } finally {
-                latch.countDown()
-            }
-        }
-        latch.await()
-        @Suppress("UNCHECKED_CAST")
-        return result as T
     }
 
     companion object {

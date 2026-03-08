@@ -85,6 +85,16 @@
             android:src="@drawable/ic_send"
             app:tint="@color/white" />
 
+        <ImageButton
+            android:id="@+id/btn_pause"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:layout_marginStart="6dp"
+            android:background="@drawable/bg_send_button"
+            android:contentDescription="暂停"
+            android:src="@drawable/ic_pause"
+            app:tint="@color/white" />
+
     </LinearLayout>
 
     <ProgressBar

@@ -41,6 +41,11 @@
             android:theme="@style/Theme.AndroidClaw" />
 
         <activity
+            android:name=".ui.ImageViewerActivity"
+            android:exported="false"
+            android:theme="@style/Theme.AndroidClaw" />
+
+        <activity
             android:name=".ui.SettingsActivity"
             android:exported="false"
             android:parentActivityName=".ui.MainActivity"
@@ -68,6 +73,18 @@
             android:name=".ui.McpSettingsActivity"
             android:exported="false"
             android:parentActivityName=".ui.MainActivity"
+            android:theme="@style/Theme.AndroidClaw" />
+
+        <activity
+            android:name=".ui.AgentLogListActivity"
+            android:exported="false"
+            android:parentActivityName=".ui.MainActivity"
+            android:theme="@style/Theme.AndroidClaw" />
+
+        <activity
+            android:name=".ui.AgentLogDetailActivity"
+            android:exported="false"
+            android:parentActivityName=".ui.AgentLogListActivity"
             android:theme="@style/Theme.AndroidClaw" />
 
         <service

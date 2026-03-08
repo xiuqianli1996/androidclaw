@@ -56,6 +56,10 @@ class FeishuSettingsActivity : AppCompatActivity() {
         binding.btnTest.setOnClickListener {
             testWebhook()
         }
+
+        binding.btnHealth.setOnClickListener {
+            showHealthStatus()
+        }
     }
 
     private fun loadConfig() {
@@ -119,6 +123,15 @@ class FeishuSettingsActivity : AppCompatActivity() {
         
         binding.btnTest.isEnabled = true
         binding.btnTest.text = "测试Webhook"
+    }
+
+    private fun showHealthStatus() {
+        val status = botService.getHealthStatus()
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("飞书连接状态")
+            .setMessage(status)
+            .setPositiveButton("关闭", null)
+            .show()
     }
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean {

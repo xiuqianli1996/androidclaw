@@ -193,10 +193,19 @@
                     android:text="测试Webhook" />
 
                 <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btn_save"
+                    android:id="@+id/btn_health"
+                    style="@style/Widget.Material3.Button.OutlinedButton"
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
+                    android:layout_marginEnd="8dp"
+                    android:text="连接状态" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btn_save"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1.2"
                     android:text="保存配置" />
 
             </LinearLayout>
